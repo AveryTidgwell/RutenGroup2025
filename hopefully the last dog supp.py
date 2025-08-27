@@ -1,0 +1,282 @@
+def preprocessing():
+    import os
+    import numpy as np
+    import pandas as pd
+
+    # === Load data ===
+    CBC_path = os.path.abspath(os.path.join('/Volumes/Health Files', 'DOGGIES/CBC Dog.csv'))
+    EOLS_path = os.path.abspath(os.path.join('/Volumes/Health Files', 'DOGGIES/EOLS Dog.csv'))
+    meta_path = os.path.abspath(os.path.join('/Volumes/Health Files', 'DOGGIES/Metadata Dog.csv'))
+    ov_path = os.path.abspath(os.path.join('/Volumes/Health Files', 'DOGGIES/Overview Dog.csv'))
+    chem_path = os.path.abspath(os.path.join('/Volumes/Health Files', 'DOGGIES/Chemistry Dog.csv'))
+
+    df = pd.read_csv(CBC_path)
+    EOLS_df = pd.read_csv(EOLS_path)
+    meta_df = pd.read_csv(meta_path)
+    ov_df = pd.read_csv(ov_path)
+    chem_df = pd.read_csv(chem_path)
+
+    # === Preprocess CBC ===
+    df.columns = df.columns.str.strip().str.lower()
+    df = df.drop(['sample_year', 'krt_cbc_abs_metamyelocytes', 'krt_cbc_rel_metamyelocytes',
+                  'krt_cbc_abs_other_cells', 'krt_cbc_abs_bands', 'krt_cbc_abs_basophils', 'krt_cbc_abs_other_cells',
+                  'krt_cbc_rel_metamyelocytes', 'krt_cbc_rel_bands', 'krt_cbc_rel_basophils', 'krt_cbc_rel_other_cells',
+                  'krt_cbc_pcv', 'krt_cbc_plt_quant', 'krt_cbc_plt_morph', 'krt_cbc_plt_morph_2', 'krt_cbc_plt_morph_num',
+                  'krt_cbc_plt_morph_num_2', 'krt_cbc_nucleated_rbcs', 'krt_cbc_rel_neutrophils', 'krt_cbc_rel_lymphocytes',
+                  'krt_cbc_rel_monocytes', 'krt_cbc_rel_eosinophils', 'krt_cbc_retic_per'], axis=1)
+    df = df.iloc[:, :18]
+    id_counts = df['dog_id'].value_counts()
+    df = df[df['dog_id'].isin(id_counts[id_counts > 1].index)]
+    ov_df.columns = ov_df.columns.str.strip().str.lower()
+
+    # === Preprocess Chemistry ===
+    chem_df.columns = chem_df.columns.str.strip().str.lower()
+    chem_df = chem_df.drop(['sample_year','krt_cp_total_protein_modifier', 'krt_cp_albumin_modifier',
+                            'krt_cp_globulins_modifier', 'krt_cp_alb_glob_ratio_value', 'krt_cp_alb_glob_ratio_modifier',
+                            'krt_cp_calcium_modifier', 'krt_cp_phosphorus_modifier', 'krt_cp_magnesium_modifier',
+                            'krt_cp_glucose_modifier', 'krt_cp_bun_modifier', 'krt_cp_creatinine_modifier',
+                            'krt_cp_bilirubin_total_modifier', 'krt_cp_alkp_modifier', 'krt_cp_alt_modifier',
+                            'krt_cp_ggt_modifier', 'krt_cp_amylase_modifier', 'krt_cp_triglycerides_modifier',
+                            'krt_cp_cholesterol_modifier', 'krt_cp_sodium_modifier', 'krt_cp_potassium_modifier',
+                            'krt_cp_chloride_modifier', 'krt_cp_sp_ratio_value', 'krt_cp_sp_ratio_modifier',
+                            'krt_cp_test_comments'], axis=1)
+
+    # === Add source tags to identify origin ===
+    df['source'] = 'cbc'
+    chem_df['source'] = 'chem'
+
+    # === Add estimated DOB and sample_date for CBC ===
+    dob_df = ov_df[['dog_id', 'estimated_dob']].drop_duplicates()
+    df = df.merge(dob_df, on='dog_id', how='left')
+
+    meta_df.columns = meta_df.columns.str.strip().str.lower()
+    meta_cbc = meta_df[meta_df['sample_type'] == 'CBC'][['dog_id', 'sample_collection_datetime', 'dap_sample_id']].drop_duplicates()
+    meta_cbc = meta_cbc.rename(columns={'sample_collection_datetime': 'sample_date'})
+    df = df.merge(meta_cbc, on=['dog_id', 'dap_sample_id'], how='left')
+
+
+    # === Add estimated DOB and sample_date for Chem ===
+    chem_df = chem_df.merge(dob_df, on='dog_id', how='left')
+    meta_chem = meta_df[meta_df['sample_type'] == 'Chemistry Panel'][['dog_id', 'sample_collection_datetime', 'dap_sample_id']].rename(
+        columns={'sample_collection_datetime': 'sample_date'})
+    chem_df = chem_df.merge(meta_chem, on=['dog_id', 'dap_sample_id'], how='left')
+
+    # === Convert to datetime and calculate Age ===
+    for sub_df in [df, chem_df]:
+        sub_df['sample_date'] = pd.to_datetime(sub_df['sample_date'], errors='coerce')
+        sub_df['estimated_dob'] = pd.to_datetime(sub_df['estimated_dob'], errors='coerce')
+        sub_df['Age'] = (sub_df['sample_date'] - sub_df['estimated_dob']).dt.total_seconds() / (365.25 * 24 * 3600)
+        sub_df['sample_date'] = sub_df['sample_date'].dt.normalize()
+
+    # === Debugging prints before concatenation ===
+    print(f"CBC rows before concat: {len(df)}")
+    print(f"Chemistry rows before concat: {len(chem_df)}")
+    print(f"CBC sample dog_ids: {df['dog_id'].unique()[:5]}")
+    print(f"Chemistry sample dog_ids: {chem_df['dog_id'].unique()[:5]}")
+
+    # === Align columns before concatenation ===
+    all_cols = set(df.columns).union(set(chem_df.columns))
+    for col in all_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+        if col not in chem_df.columns:
+            chem_df[col] = np.nan
+
+    # === Concatenate CBC and Chemistry rows ===
+    df = pd.concat([df, chem_df], ignore_index=True)
+
+    # === Debugging prints after concatenation ===
+    print(f"Combined rows after concat: {len(df)}")
+    print(f"Source counts:\n{df['source'].value_counts()}")
+
+    # === Merge mortality ===
+    EOLS_df.columns = EOLS_df.columns.str.strip().str.lower()
+    df = df.merge(EOLS_df[['dog_id', 'eol_death_date']], on='dog_id', how='left')
+    df['eol_death_date'] = pd.to_datetime(df['eol_death_date'], errors='coerce')
+    df['death_age'] = (df['eol_death_date'] - df['estimated_dob']).dt.total_seconds() / (365.25 * 24 * 3600)
+    
+    # === Sex & fixed status ===
+    col = 'sex_class_at_hles'
+    ov_df[col] = ov_df[col].astype(str).str.lower().str.strip()
+    ov_df['Sex'] = ov_df[col].apply(lambda x: 'F' if 'f' in x else ('M'))
+    ov_df['Fixed'] = ov_df[col].apply(lambda x: 'intact' if 'intact' in x else ('fixed' if 'spayed' in x or 'neutered' in x else np.nan))
+    df = df.merge(ov_df[['dog_id', 'Sex', 'Fixed']], on='dog_id', how='left')
+
+    # === Clean up ===
+    df = df.drop(columns=['sample_date', 'dap_sample_id', 'estimated_dob', 'eol_death_date', 'source'])
+    df = df.dropna(subset=['Age'])
+
+    # Remove 'Age' and reinsert it near the end (just before last 4 cols)
+    cols = list(df.columns)
+    cols.remove('Age')
+    cols.insert(len(df.columns) - 4, 'Age')
+
+    # Reorder the DataFrame
+    df = df[cols]
+
+    # === Rename biomarker columns ===
+    df = df.rename(columns={
+        'krt_cbc_total_wbcs': 'wbc',
+        'krt_cbc_abs_neutrophils': 'neutrophils',
+        'krt_cbc_abs_lymphocytes': 'lymphocytes',
+        'krt_cbc_abs_monocytes': 'monocytes',
+        'krt_cbc_abs_eosinophils': 'eosinophils',
+        'krt_cbc_rbc': 'rbc',
+        'krt_cbc_hgb': 'hgb',
+        'krt_cbc_hct': 'hct',
+        'krt_cbc_mcv': 'mcv',
+        'krt_cbc_mch': 'mch',
+        'krt_cbc_mchc': 'mchc',
+        'krt_cbc_rdw': 'rdw',
+        'krt_cbc_plt': 'plt',
+        'krt_cbc_mpv': 'mpv',
+        'krt_cbc_pct': 'pct',
+        'krt_cbc_retic_abs': 'reticulocytes',
+        'krt_cp_chloride_value': 'chloride',
+        'krt_cp_triglycerides_value': 'triglycerides',
+        'krt_cp_alt_value': 'alt',
+        'krt_cp_bun_value': 'bun',
+        'krt_cp_alkp_value': 'alkphos',
+        'krt_cp_potassium_value': 'potassium',
+        'krt_cp_phosphorus_value': 'phosphorus',
+        'krt_cp_total_protein_value': 'protein',
+        'krt_cp_globulins_value': 'globulins',
+        'krt_cp_calcium_value': 'calcium',
+        'krt_cp_albumin_value': 'albumin',
+        'krt_cp_sodium_value': 'sodium',
+        'krt_cp_glucose_value': 'glucose',
+        'krt_cp_cholesterol_value': 'cholesterol',
+        'krt_cp_creatinine_value': 'creatinine',
+        'krt_cp_ggt_value': 'ggt',
+        'krt_cp_bilirubin_total_value': 'bilirubin',
+        'krt_cp_magnesium_value': 'magnesium',
+        'krt_cp_amylase_value': 'amylase'
+    })
+    
+    def merge_same_day_duplicates(df):
+        # Identify rows that share the same dog_id and Age
+        dup_groups = df.groupby(['dog_id', 'Age'])
+
+        merged_rows = []
+        seen_keys = set()
+
+        for (dog_id, age), group in dup_groups:
+            if len(group) == 1:
+                merged_rows.append(group.iloc[0])
+                continue
+
+            # Initialize with the first row
+            merged = group.iloc[0].copy()
+
+            for _, row in group.iloc[1:].iterrows():
+                for col in df.columns:
+                    if pd.isna(merged[col]) and not pd.isna(row[col]):
+                        merged[col] = row[col]
+
+            merged_rows.append(merged)
+
+        return pd.DataFrame(merged_rows)
+
+    df = merge_same_day_duplicates(df)
+
+    df = df.sort_values(by=['dog_id', 'Age'], axis=0)
+    df = df.reset_index()
+    df = df.drop(columns='index')
+    biomarker_columns = df.columns[1:36]
+    df = df[(df['Age'] >= 1) & (df['Age'] <= 15)]
+    id_counts = df['dog_id'].value_counts()
+    df = df[df['dog_id'].isin(id_counts[id_counts > 1].index)]
+    
+    return df, biomarker_columns
+
+
+df, biomarker_columns = preprocessing()
+print(biomarker_columns)
+
+
+
+def get_z_variables(W, mu, df, biomarker_columns, plotname=None, debug=False):
+    """
+    Returns:
+      z_df, z_mu_df, biomarker_weights, sorted_eigenvalues, z_col_rank_map, mu_col_rank_map
+    Ensures df is positional-aligned with z matrices (resets index).
+    """
+    df = df.reset_index(drop=True)  # before calling get_z_variables
+
+    # --- eigen / basis stuff (unchanged) ---
+    eigenvalues, eigenvectors = np.linalg.eig(W)
+    real_eigenvalue_order = np.argsort(-eigenvalues.real)
+
+    sorted_eigenvalues = eigenvalues[real_eigenvalue_order]
+    sorted_eigenvectors = eigenvectors[:, real_eigenvalue_order]
+    P_inv = np.linalg.inv(sorted_eigenvectors)
+
+    # --- make a positional copy of df so that we avoid index alignment issues ---
+    df_pos = df.reset_index(drop=True).copy()   # <--- important fix
+
+    # compute z's from biomarker columns (use .to_numpy() for speed / no alignment)
+    z_biomarkers = np.matmul(P_inv, df_pos[biomarker_columns].to_numpy().T).T
+    z_mu = np.matmul(P_inv, mu.T.to_numpy()).T
+
+    natural_var_names = [f'z_{i+1}' for i in range(P_inv.shape[0])]
+    natural_mu_names  = [f'mu_z_{i+1}' for i in range(P_inv.shape[0])]
+    lambda_names = [f'lambda_{i+1}' for i in range(P_inv.shape[0])]
+
+    # Create dataframes (they will have 0..N-1 index)
+    z_bio_df = pd.DataFrame(z_biomarkers.real, columns=natural_var_names)
+    #z_bio_df = z_imputation(z_bio_df, imputation_type='mean')   # if you want this here
+    z_mu_df = pd.DataFrame(z_mu.real, columns=natural_mu_names)
+
+    # Concatenate positionally (no index alignment surprises)
+    z_df = pd.concat([z_bio_df.reset_index(drop=True),
+                      df_pos[['dog_id', 'Sex', 'Fixed', 'Age']].reset_index(drop=True)],
+                     axis=1)
+
+    # Rank maps
+    z_col_rank_map = [f'z_{i+1}' for i in real_eigenvalue_order]
+    mu_col_rank_map = [f'mu_z_{i+1}' for i in real_eigenvalue_order]
+
+    biomarker_weights = pd.DataFrame(
+        P_inv.real,
+        columns=biomarker_columns,
+        index=natural_var_names
+    )
+
+    # optional debug checks
+    if debug:
+        # check for any NaNs in the covariates we just attached
+        cov_na = z_df[['dog_id', 'Sex', 'Fixed', 'Age']].isnull().any(axis=1)
+        print(f"DEBUG: total rows: {len(z_df)}")
+        print(f"DEBUG: rows with any covariate NA: {cov_na.sum()}")
+        if cov_na.any():
+            print("DEBUG: indices with covariate NA:", z_df.index[cov_na].tolist())
+            # Show a sample of z rows with missing covariates
+            display(z_df.loc[cov_na, z_df.columns[:10]])  # show first cols for context
+
+    # plotting (unchanged, except using df_pos if needed)
+    if plotname is not None:
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=lambda_names, y=sorted_eigenvalues.real, marker='o', color="lightseagreen")
+        plt.xlabel("Natural Variable")
+        plt.ylabel("Eigenvalue")
+        plt.title("Sorted Eigenvalues of W (by stability)")
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+
+        save_dir = os.path.join(os.getcwd(), 'results')
+        os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(os.path.join(save_dir, plotname + '.png'), dpi=300)
+        plt.show()
+
+    return z_df, z_mu_df, biomarker_weights, sorted_eigenvalues, z_col_rank_map, mu_col_rank_map
+
+
+
+
+
+
+
+
+
+
+
